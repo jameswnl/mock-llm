@@ -28,17 +28,17 @@ import uvicorn
 
 app = FastAPI(title="Mock OpenAI Server")
 
-# -- config set at startup via CLI args --
-_latency_ms: float = 0
-_stream_delay_ms: float = 10
-
-CANNED_REPLY = "This is a mock response from the mock OpenAI server."
-
-MODELS = [
-    {"id": "mock-gpt-4o", "object": "model", "created": 1700000000, "owned_by": "mock"},
-    {"id": "mock-gpt-4o-mini", "object": "model", "created": 1700000000, "owned_by": "mock"},
-    {"id": "mock-llama-3", "object": "model", "created": 1700000000, "owned_by": "mock"},
-]
+# -- runtime-configurable state --
+_config = {
+    "latency_ms": 0.0,
+    "stream_delay_ms": 10.0,
+    "canned_reply": "This is a mock response from the mock OpenAI server.",
+    "models": [
+        {"id": "mock-gpt-4o", "object": "model", "created": 1700000000, "owned_by": "mock"},
+        {"id": "mock-gpt-4o-mini", "object": "model", "created": 1700000000, "owned_by": "mock"},
+        {"id": "mock-llama-3", "object": "model", "created": 1700000000, "owned_by": "mock"},
+    ],
+}
 
 
 def _completion_id() -> str:
@@ -49,12 +49,35 @@ def _ts() -> int:
     return int(time.time())
 
 
+# ---------- /admin/config ----------
+
+@app.get("/admin/config")
+async def get_config():
+    return JSONResponse(_config)
+
+
+@app.patch("/admin/config")
+async def update_config(request: Request):
+    body = await request.json()
+    for key in ("latency_ms", "stream_delay_ms", "canned_reply"):
+        if key in body:
+            _config[key] = body[key]
+    if "models" in body:
+        models = []
+        for m in body["models"]:
+            if isinstance(m, str):
+                m = {"id": m, "object": "model", "created": int(time.time()), "owned_by": "mock"}
+            models.append(m)
+        _config["models"] = models
+    return JSONResponse(_config)
+
+
 # ---------- /v1/models ----------
 
 @app.get("/v1/models")
 async def list_models():
     await _maybe_sleep()
-    return JSONResponse({"object": "list", "data": MODELS})
+    return JSONResponse({"object": "list", "data": _config["models"]})
 
 
 # ---------- /v1/chat/completions ----------
@@ -87,7 +110,7 @@ async def chat_completions(request: Request):
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": CANNED_REPLY,
+                    "content": _config["canned_reply"],
                     "refusal": None,
                 },
                 "finish_reason": "stop",
@@ -105,7 +128,7 @@ async def chat_completions(request: Request):
 async def _stream_chat_chunks(model: str, include_usage: bool):
     cid = _completion_id()
     ts = _ts()
-    words = CANNED_REPLY.split()
+    words = _config["canned_reply"].split()
 
     # role chunk
     chunk = {
@@ -128,8 +151,8 @@ async def _stream_chat_chunks(model: str, include_usage: bool):
             "choices": [{"index": 0, "delta": {"content": token}, "finish_reason": None}],
         }
         yield f"data: {json.dumps(chunk)}\n\n"
-        if _stream_delay_ms > 0:
-            await asyncio.sleep(_stream_delay_ms / 1000)
+        if _config["stream_delay_ms"] > 0:
+            await asyncio.sleep(_config["stream_delay_ms"] / 1000)
 
     # finish chunk
     finish = {
@@ -172,7 +195,7 @@ async def completions(request: Request):
         "model": model,
         "choices": [
             {
-                "text": CANNED_REPLY,
+                "text": _config["canned_reply"],
                 "index": 0,
                 "finish_reason": "stop",
                 "logprobs": None,
@@ -189,7 +212,7 @@ async def completions(request: Request):
 async def _stream_completion_chunks(model: str):
     cid = f"cmpl-mock-{uuid.uuid4().hex[:12]}"
     ts = _ts()
-    words = CANNED_REPLY.split()
+    words = _config["canned_reply"].split()
 
     for i, word in enumerate(words):
         token = word if i == 0 else f" {word}"
@@ -201,8 +224,8 @@ async def _stream_completion_chunks(model: str):
             "choices": [{"text": token, "index": 0, "finish_reason": None}],
         }
         yield f"data: {json.dumps(chunk)}\n\n"
-        if _stream_delay_ms > 0:
-            await asyncio.sleep(_stream_delay_ms / 1000)
+        if _config["stream_delay_ms"] > 0:
+            await asyncio.sleep(_config["stream_delay_ms"] / 1000)
 
     finish = {
         "id": cid,
@@ -252,29 +275,29 @@ async def embeddings(request: Request):
 # ---------- helpers ----------
 
 async def _maybe_sleep():
-    if _latency_ms > 0:
-        await asyncio.sleep(_latency_ms / 1000)
+    if _config["latency_ms"] > 0:
+        await asyncio.sleep(_config["latency_ms"] / 1000)
 
 
 def main():
-    global _latency_ms, _stream_delay_ms
-
     parser = argparse.ArgumentParser(description="Mock OpenAI-compatible server for perf testing")
     parser.add_argument("--port", type=int, default=8765, help="Port to listen on (default: 8765)")
     parser.add_argument("--latency-ms", type=float, default=0, help="Artificial per-request latency in ms (default: 0)")
     parser.add_argument("--stream-delay-ms", type=float, default=10, help="Delay between SSE chunks in ms (default: 10)")
+    parser.add_argument("--workers", type=int, default=4, help="Number of uvicorn workers (default: 4)")
     args = parser.parse_args()
 
-    _latency_ms = args.latency_ms
-    _stream_delay_ms = args.stream_delay_ms
+    _config["latency_ms"] = args.latency_ms
+    _config["stream_delay_ms"] = args.stream_delay_ms
 
     print(f"Starting mock OpenAI server on port {args.port}")
-    print(f"  latency: {_latency_ms}ms per request")
-    print(f"  stream delay: {_stream_delay_ms}ms between chunks")
+    print(f"  workers: {args.workers}")
+    print(f"  latency: {_config['latency_ms']}ms per request")
+    print(f"  stream delay: {_config['stream_delay_ms']}ms between chunks")
     print(f"  base URL: http://localhost:{args.port}/v1")
-    print(f"  models: {[m['id'] for m in MODELS]}")
+    print(f"  models: {[m['id'] for m in _config['models']]}")
 
-    uvicorn.run(app, host="0.0.0.0", port=args.port)
+    uvicorn.run(app, host="0.0.0.0", port=args.port, workers=args.workers)
 
 
 if __name__ == "__main__":
