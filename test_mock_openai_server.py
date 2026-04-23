@@ -129,6 +129,92 @@ async def test_chat_completions_streaming_content_reassembles(client):
     assert content == "This is a mock response from the mock OpenAI server."
 
 
+# ---------- /v1/chat/completions with tools ----------
+
+FILE_SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "file_search",
+        "description": "Search files for relevant information",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
+async def test_chat_completions_tool_call_non_streaming(client):
+    resp = await client.post("/v1/chat/completions", json={
+        "model": "mock-gpt-4o",
+        "messages": [{"role": "user", "content": "search for info"}],
+        "tools": [FILE_SEARCH_TOOL],
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["choices"][0]["finish_reason"] == "tool_calls"
+    assert body["choices"][0]["message"]["content"] is None
+    tool_calls = body["choices"][0]["message"]["tool_calls"]
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["type"] == "function"
+    assert tool_calls[0]["function"]["name"] == "file_search"
+    args = json.loads(tool_calls[0]["function"]["arguments"])
+    assert "query" in args
+
+
+async def test_chat_completions_tool_call_streaming(client):
+    resp = await client.post("/v1/chat/completions", json={
+        "model": "mock-gpt-4o",
+        "messages": [{"role": "user", "content": "search for info"}],
+        "tools": [FILE_SEARCH_TOOL],
+        "stream": True,
+    })
+    assert resp.status_code == 200
+    chunks = _parse_sse(resp.text)
+
+    # first chunk has tool call with function name
+    first_tc = chunks[0]["choices"][0]["delta"]["tool_calls"][0]
+    assert first_tc["function"]["name"] == "file_search"
+    assert first_tc["id"].startswith("call_mock_")
+
+    # last chunk has finish_reason tool_calls
+    assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
+
+
+async def test_chat_completions_tool_result_gets_text_reply(client):
+    """After a tool result, the mock should respond with text, not another tool call."""
+    resp = await client.post("/v1/chat/completions", json={
+        "model": "mock-gpt-4o",
+        "messages": [
+            {"role": "user", "content": "search for info"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "call_123", "type": "function", "function": {"name": "file_search", "arguments": "{}"}}
+            ]},
+            {"role": "tool", "tool_call_id": "call_123", "content": "some search results"},
+        ],
+        "tools": [FILE_SEARCH_TOOL],
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["choices"][0]["finish_reason"] == "stop"
+    assert body["choices"][0]["message"]["content"] is not None
+
+
+async def test_chat_completions_no_tools_gets_text_reply(client):
+    """Without tools in the request, always get a text reply."""
+    resp = await client.post("/v1/chat/completions", json={
+        "model": "mock-gpt-4o",
+        "messages": [{"role": "user", "content": "hello"}],
+    })
+    body = resp.json()
+    assert body["choices"][0]["finish_reason"] == "stop"
+    assert body["choices"][0]["message"]["content"] is not None
+    assert "tool_calls" not in body["choices"][0]["message"]
+
+
 # ---------- /v1/completions ----------
 
 async def test_completions_non_streaming(client):

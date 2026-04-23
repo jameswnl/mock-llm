@@ -84,8 +84,9 @@ async def chat_completions(request: Request):
     body = await request.json()
     model = body.get("model", "mock-gpt-4o")
     stream = body.get("stream", False)
+    tools = body.get("tools", [])
     n_messages = len(body.get("messages", []))
-    logger.debug("POST /v1/chat/completions model=%s stream=%s messages=%d", model, stream, n_messages)
+    logger.debug("POST /v1/chat/completions model=%s stream=%s messages=%d tools=%d", model, stream, n_messages, len(tools))
     include_usage = False
     if stream:
         so = body.get("stream_options") or {}
@@ -93,11 +94,23 @@ async def chat_completions(request: Request):
 
     await _maybe_sleep()
 
+    # If tools are provided and the last message is not a tool result,
+    # respond with a tool call to exercise the tool execution pipeline
+    should_call_tool = tools and not _last_message_is_tool_result(body.get("messages", []))
+
     if stream:
+        if should_call_tool:
+            return StreamingResponse(
+                _stream_chat_tool_call_chunks(model, tools, include_usage),
+                media_type="text/event-stream",
+            )
         return StreamingResponse(
             _stream_chat_chunks(model, include_usage),
             media_type="text/event-stream",
         )
+
+    if should_call_tool:
+        return JSONResponse(_build_tool_call_response(model, tools))
 
     return JSONResponse({
         "id": _completion_id(),
@@ -122,6 +135,137 @@ async def chat_completions(request: Request):
             "total_tokens": 18,
         },
     })
+
+
+def _last_message_is_tool_result(messages: list[dict]) -> bool:
+    if not messages:
+        return False
+    return messages[-1].get("role") == "tool"
+
+
+def _build_tool_call_args(tool: dict) -> str:
+    """Build mock arguments for a tool call based on the tool's parameters."""
+    func = tool.get("function", {})
+    params = func.get("parameters", {}).get("properties", {})
+    # Use "query" if it exists (file_search, knowledge_search), otherwise first string param
+    if "query" in params:
+        return json.dumps({"query": "mock search query"})
+    for param_name, param_def in params.items():
+        if param_def.get("type") == "string":
+            return json.dumps({param_name: f"mock {param_name}"})
+    return "{}"
+
+
+def _build_tool_call_response(model: str, tools: list[dict]) -> dict:
+    """Build a non-streaming tool call response for the first tool."""
+    tool = tools[0]
+    func_name = tool.get("function", {}).get("name", "unknown")
+    call_id = f"call_mock_{uuid.uuid4().hex[:12]}"
+    logger.debug("Responding with tool_call: %s", func_name)
+    return {
+        "id": _completion_id(),
+        "object": "chat.completion",
+        "created": _ts(),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "refusal": None,
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": func_name,
+                                "arguments": _build_tool_call_args(tool),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+                "logprobs": None,
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 12,
+            "total_tokens": 22,
+        },
+    }
+
+
+async def _stream_chat_tool_call_chunks(model: str, tools: list[dict], include_usage: bool):
+    cid = _completion_id()
+    ts = _ts()
+    tool = tools[0]
+    func_name = tool.get("function", {}).get("name", "unknown")
+    call_id = f"call_mock_{uuid.uuid4().hex[:12]}"
+    arguments = _build_tool_call_args(tool)
+    logger.debug("Streaming tool_call: %s", func_name)
+
+    # role chunk with tool call start
+    chunk = {
+        "id": cid,
+        "object": "chat.completion.chunk",
+        "created": ts,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "index": 0,
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": func_name, "arguments": ""},
+                }],
+            },
+            "finish_reason": None,
+        }],
+    }
+    yield f"data: {json.dumps(chunk)}\n\n"
+
+    # arguments chunk
+    chunk = {
+        "id": cid,
+        "object": "chat.completion.chunk",
+        "created": ts,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "function": {"arguments": arguments},
+                }],
+            },
+            "finish_reason": None,
+        }],
+    }
+    yield f"data: {json.dumps(chunk)}\n\n"
+    if _stream_delay_ms > 0:
+        await asyncio.sleep(_stream_delay_ms / 1000)
+
+    # finish chunk
+    finish = {
+        "id": cid,
+        "object": "chat.completion.chunk",
+        "created": ts,
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+    }
+    if include_usage:
+        finish["usage"] = {
+            "prompt_tokens": 10,
+            "completion_tokens": 12,
+            "total_tokens": 22,
+        }
+    yield f"data: {json.dumps(finish)}\n\n"
+    yield "data: [DONE]\n\n"
 
 
 async def _stream_chat_chunks(model: str, include_usage: bool):
