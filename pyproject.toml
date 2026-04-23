@@ -1,0 +1,12 @@
+[project]
+name = "mock-llm"
+version = "0.1.0"
+description = "Mock OpenAI-compatible server for performance testing"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+]
+
+[project.scripts]
+mock-llm = "mock_openai_server:main"
