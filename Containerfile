@@ -7,7 +7,10 @@ RUN pip install --no-cache-dir fastapi uvicorn
 
 COPY mock_openai_server.py .
 
+ENV MOCK_LLM_PORT=8765
+ENV MOCK_LLM_WORKERS=4
+ENV MOCK_LLM_LOG_LEVEL=info
+
 EXPOSE 8765
 
-ENTRYPOINT ["python", "mock_openai_server.py"]
-CMD ["--port", "8765", "--workers", "4"]
+CMD ["python", "mock_openai_server.py"]

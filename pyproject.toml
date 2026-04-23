@@ -8,5 +8,15 @@ dependencies = [
     "uvicorn",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
 [project.scripts]
 mock-llm = "mock_openai_server:main"

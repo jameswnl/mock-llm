@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-llm-dev
+  labels:
+    app: mock-llm-dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-llm-dev
+  template:
+    metadata:
+      labels:
+        app: mock-llm-dev
+    spec:
+      containers:
+        - name: mock-llm-dev
+          image: image-registry.openshift-image-registry.svc:5000/mock-llm/mock-llm:dev
+          ports:
+            - containerPort: 8765
+              protocol: TCP
+          env:
+            - name: MOCK_LLM_LOG_LEVEL
+              value: "debug"
+            - name: MOCK_LLM_LATENCY_MS
+              value: "0"
+            - name: MOCK_LLM_STREAM_DELAY_MS
+              value: "10"
+            - name: MOCK_LLM_WORKERS
+              value: "4"
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: 8765
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /v1/models
+              port: 8765
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-llm-dev
+  labels:
+    app: mock-llm-dev
+spec:
+  selector:
+    app: mock-llm-dev
+  ports:
+    - port: 8765
+      targetPort: 8765
+      protocol: TCP
+      name: http
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: mock-llm-dev
+  labels:
+    app: mock-llm-dev
+spec:
+  to:
+    kind: Service
+    name: mock-llm-dev
+  port:
+    targetPort: http
+  tls:
+    termination: edge
